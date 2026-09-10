@@ -1,0 +1,40 @@
+$ python -m pytest tests/test_tool_governance.py -v -k transfer
+============================= test session starts =============================
+platform win32 -- Python 3.12.14, pytest-8.4.2, pluggy-1.6.0 -- D:\课程\llm-gateway\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\课程\第二章\提交作业\第二章作业-转账工具
+plugins: anyio-4.15.1
+collecting ... collected 5 items
+
+tests/test_tool_governance.py::test_transfer_schema_rejects_extra PASSED [ 20%]
+tests/test_tool_governance.py::test_transfer_precheck_insufficient PASSED [ 40%]
+tests/test_tool_governance.py::test_transfer_precheck_exceed_limit PASSED [ 60%]
+tests/test_tool_governance.py::test_transfer_approval_binding PASSED     [ 80%]
+tests/test_tool_governance.py::test_transfer_timeout_no_retry PASSED     [100%]
+
+============================== 5 passed in 1.69s ==============================
+
+
+$ python -m pytest tests/test_tool_governance.py -v -s -k transfer_approval_binding
+============================= test session starts =============================
+platform win32 -- Python 3.12.14, pytest-8.4.2, pluggy-1.6.0 -- D:\课程\llm-gateway\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\课程\第二章\提交作业\第二章作业-转账工具
+plugins: anyio-4.15.1
+collecting ... collected 5 items / 4 deselected / 1 selected
+
+tests/test_tool_governance.py::test_transfer_approval_binding Before approval: CONFIRM (APPROVAL_REQUIRED)
+Audit: [{"trace_id": "trace_demo", "tool_call_id": "call_pending", "tool_name": "transfer", "user_id": "u_100", "tenant_id": "tenant_a", "phase": "decision", "decision": "confirm", "code": "APPROVAL_REQUIRED", "argument_keys": ["amount", "from_account", "to_account"], "latency_ms": null, "safe_target": "ACC-A-****3456->ACC-A-****8888"}, {"trace_id": "trace_demo", "tool_call_id": "call_changed", "tool_name": "transfer", "user_id": "u_100", "tenant_id": "tenant_a", "phase": "decision", "decision": "confirm", "code": "APPROVAL_REQUIRED", "argument_keys": ["amount", "from_account", "to_account"], "latency_ms": null, "safe_target": "ACC-A-****3456->ACC-A-****8888"}, {"trace_id": "trace_demo", "tool_call_id": "call_success_123456", "tool_name": "transfer", "user_id": "u_100", "tenant_id": "tenant_a", "phase": "decision", "decision": "allow", "code": "APPROVED", "argument_keys": ["amount", "from_account", "to_account"], "latency_ms": null, "safe_target": "ACC-A-****3456->ACC-A-****8888"}, {"trace_id": "trace_demo", "tool_call_id": "call_success_123456", "tool_name": "transfer", "user_id": "u_100", "tenant_id": "tenant_a", "phase": "execution", "decision": "executed", "code": "OK", "argument_keys": ["amount", "from_account", "to_account"], "latency_ms": 0, "safe_target": "ACC-A-****3456->ACC-A-****8888"}, {"trace_id": "trace_demo", "tool_call_id": "call_replay", "tool_name": "transfer", "user_id": "u_100", "tenant_id": "tenant_a", "phase": "decision", "decision": "confirm", "code": "APPROVAL_REQUIRED", "argument_keys": ["amount", "from_account", "to_account"], "latency_ms": null, "safe_target": "ACC-A-****3456->ACC-A-****8888"}]
+PASSED
+
+======================= 1 passed, 4 deselected in 0.12s =======================
+
+
+$ python tool_governance_demo.py
+{"tool_call_id": "call_01", "tool_name": "get_order", "ok": true, "action": "allow", "code": "OK", "content": {"status": "paid", "refundable": 399.0, "customer_email": "***@***", "access_token": "***"}}
+{"tool_call_id": "call_02", "tool_name": "create_refund", "ok": false, "action": "confirm", "code": "APPROVAL_REQUIRED", "content": "需要确认本次具体动作"}
+{"tool_call_id": "call_03", "tool_name": "create_refund", "ok": true, "action": "allow", "code": "OK", "content": {"refund_id": "ref_9001", "idempotency_key": "call_03", "tenant_id": "tenant_a", "order_id": "ord_1001", "amount": 399.0, "status": "accepted"}}
+{"tool_call_id": "call_04", "tool_name": "create_refund", "ok": false, "action": "deny", "code": "INVALID_ARGUMENT", "content": [{"path": "user_id", "message": "Extra inputs are not permitted"}, {"path": "approved", "message": "Extra inputs are not permitted"}]}
+{"tool_call_id": "call_05", "tool_name": "run_shell", "ok": false, "action": "deny", "code": "DENY_RULE", "content": "命中 deny 规则"}
+{"tool_call_id": "call_06", "tool_name": "create_refund", "ok": false, "action": "deny", "code": "PLAN_MODE_DENIED", "content": "plan 模式禁止写操作和 Shell"}
+{"side_effects": {"refund_executions": 1, "shell_executions": 0, "transfer_executions": 0}, "audit_records": 8}
