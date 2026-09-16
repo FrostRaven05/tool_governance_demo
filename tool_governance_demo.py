@@ -81,17 +81,17 @@ class CreateRefundArgs(StrictArgs):
     reason: str = Field(min_length=4, max_length=200)
 
 
+class RunShellArgs(StrictArgs):
+    command: str = Field(min_length=1, max_length=200)
+
+
 class TransferArgs(StrictArgs):
     from_account: str = Field(pattern=r"^ACC-[A-Z]-[0-9]{6}$")
     to_account: str = Field(pattern=r"^ACC-[A-Z]-[0-9]{6}$")
     amount: float = Field(gt=0, le=100_000)
 
 
-class RunShellArgs(StrictArgs):
-    command: str = Field(min_length=1, max_length=200)
-
-
-ArgsModel = GetOrderArgs | CreateRefundArgs | TransferArgs | RunShellArgs
+ArgsModel = GetOrderArgs | CreateRefundArgs | RunShellArgs | TransferArgs
 Handler = Callable[[str, ArgsModel, ExecutionContext], Awaitable[Mapping[str, Any]]]
 Precheck = Callable[[ArgsModel, ExecutionContext], Awaitable[None]]
 CanonicalTarget = Callable[[ArgsModel], str]
@@ -297,7 +297,7 @@ def _redact(value: Any) -> Any:
         return [_redact(item) for item in value]
     if isinstance(value, str):
         value = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "***@***", value)
-        return re.sub(r"\b(ACC-[A-Z]-)[0-9]{2}([0-9]{4})\b", r"\1****\2", value)
+        return re.sub(r"(ACC-[A-Z])-[0-9]{2}([0-9]{4})", r"\1-****\2", value)
     return value
 
 
@@ -467,7 +467,6 @@ class ToolRuntime:
 
         # prepare-2：执行期重新授权，返回 allow / deny / confirm。
         decision = await self._permission_engine.decide(tool, arguments, context)
-        # 仅记录转账目标的脱敏摘要，不将完整参数写入审计。
         safe_target = (
             _redact(tool.canonical_target(arguments))
             if isinstance(arguments, TransferArgs)
@@ -600,17 +599,17 @@ ORDERS = {
         "customer_email": "alice@example.com",
     }
 }
-ACCOUNTS = {
-    ("tenant_a", "ACC-A-123456"): 100000.0,
-    ("tenant_a", "ACC-A-654321"): 5000.0,
-    ("tenant_a", "ACC-A-888888"): 20000.0,
-    ("tenant_b", "ACC-B-111111"): 50000.0,
+ACCOUNTS: dict[tuple[str, str], float] = {
+    ("tenant_a", "ACC-A-123456"): 100_000.0,
+    ("tenant_a", "ACC-A-654321"): 5_000.0,
+    ("tenant_a", "ACC-A-888888"): 20_000.0,
+    ("tenant_b", "ACC-B-111111"): 50_000.0,
 }
-SIDE_EFFECTS = {"refund_executions": 0, "shell_executions": 0, "transfer_executions": 0}
+SIDE_EFFECTS = {"refund_executions": 0, "shell_executions": 0}
 
 
 def reset_side_effects() -> None:
-    SIDE_EFFECTS.update(refund_executions=0, shell_executions=0, transfer_executions=0)
+    SIDE_EFFECTS.update(refund_executions=0, shell_executions=0)
 
 
 async def get_order_handler(
@@ -636,39 +635,16 @@ async def refund_precheck(raw_arguments: ArgsModel, context: ExecutionContext) -
         raise PolicyDenied("BUSINESS_RULE_DENIED", "退款金额超过可退金额")
 
 
-async def transfer_precheck(args: ArgsModel, context: ExecutionContext) -> None:
-    assert isinstance(args, TransferArgs)
-    if args.amount > 50_000:
-        raise PolicyDenied("EXCEED_LIMIT", "转账金额超过单笔限额")
-    balance = ACCOUNTS.get((context.tenant_id, args.from_account), 0.0)
-    if balance < args.amount:
+async def transfer_precheck(raw_arguments: ArgsModel, context: ExecutionContext) -> None:
+    """只做判断，不改余额：先检查教学拦截区间，再检查余额。"""
+
+    arguments = raw_arguments
+    assert isinstance(arguments, TransferArgs)
+    if 50_000 < arguments.amount <= 80_000:
+        raise PolicyDenied("EXCEED_LIMIT", "转账金额处于教学拦截区间 (50000, 80000]")
+    balance = ACCOUNTS.get((context.tenant_id, arguments.from_account))
+    if balance is None or balance < arguments.amount:
         raise PolicyDenied("INSUFFICIENT_BALANCE", "转出账户余额不足")
-
-
-async def transfer_handler(
-    tool_call_id: str,
-    args: ArgsModel,
-    context: ExecutionContext,
-) -> Mapping[str, Any]:
-    assert isinstance(args, TransferArgs)
-    if args.amount > 80_000:
-        await asyncio.sleep(3.0)
-
-    from_key = (context.tenant_id, args.from_account)
-    to_key = (context.tenant_id, args.to_account)
-    if to_key not in ACCOUNTS:
-        raise PolicyDenied("ACCOUNT_NOT_FOUND", "转入账户不存在")
-
-    ACCOUNTS[from_key] -= args.amount
-    ACCOUNTS[to_key] += args.amount
-    SIDE_EFFECTS["transfer_executions"] += 1
-    return {
-        "txn_id": tool_call_id[-6:],
-        "from": args.from_account,
-        "to": args.to_account,
-        "amount": args.amount,
-        "status": "completed",
-    }
 
 
 async def create_refund_handler(
@@ -684,6 +660,36 @@ async def create_refund_handler(
         "idempotency_key": tool_call_id,
         "tenant_id": context.tenant_id,
         "order_id": arguments.order_id,
+        "amount": arguments.amount,
+        "status": "accepted",
+    }
+
+
+async def transfer_handler(
+    tool_call_id: str,
+    raw_arguments: ArgsModel,
+    context: ExecutionContext,
+) -> Mapping[str, Any]:
+    arguments = raw_arguments
+    assert isinstance(arguments, TransferArgs)
+
+    # 教学模拟：precheck 仅拦截 (50000, 80000]，更大金额通过余额检查和审批后进入超时分支。
+    # sleep(3.0) 会被 asyncio.timeout(timeout_seconds=2.0) 掐断 → TIMEOUT_UNKNOWN。
+    if arguments.amount > 80_000:
+        await asyncio.sleep(3.0)
+
+    to_key = (context.tenant_id, arguments.to_account)
+    if to_key not in ACCOUNTS:
+        raise PolicyDenied("ACCOUNT_NOT_FOUND", "转入账户不存在")
+
+    from_key = (context.tenant_id, arguments.from_account)
+    ACCOUNTS[from_key] -= arguments.amount
+    ACCOUNTS[to_key] += arguments.amount
+
+    return {
+        "txn_id": tool_call_id[-6:],
+        "from": arguments.from_account,
+        "to": arguments.to_account,
         "amount": arguments.amount,
         "status": "accepted",
     }
@@ -733,20 +739,15 @@ def build_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="transfer",
-            description="在当前租户账户之间转账，必须经过人工审批",
+            description="在当前租户的两个账户之间转账",
             parameters_model=TransferArgs,
-            policy=ToolPolicy(
-                effect=Effect.WRITE,
-                risk=Risk.HIGH,
-                permission="transfer:execute",
-                requires_approval=True,
-                timeout_seconds=1.5,
-                max_retries=0,
-                idempotent=False,
-            ),
+            policy=ToolPolicy(Effect.WRITE, Risk.HIGH, "transfer:execute", True, 2.0, 0, False),
             handler=transfer_handler,
             precheck=transfer_precheck,
-            canonical_target=lambda args: f"{args.from_account}->{args.to_account}",
+            canonical_target=lambda args: (
+                f"{getattr(args, 'from_account')}->{getattr(args, 'to_account')}:"
+                f"{getattr(args, 'amount')}"
+            ),
         ),
     ]
 
